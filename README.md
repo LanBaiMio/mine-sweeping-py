@@ -12,9 +12,9 @@ tensorflow==2.15.0
 keras==2.15.0
 
 # 1.使用方法
-安装以上的库
+根据依赖库配置好环境
 
-git clone 或者下载zip再解压
+git clone 或者下载zip解压，需要解压model_and_data.rar
 
 运行gui.py
 
