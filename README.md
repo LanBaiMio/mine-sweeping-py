@@ -1,14 +1,23 @@
 
 # 0.依赖库
 python==3.10.2
+
 numpy==1.26.4
+
 matplotlib==3.8.4
+
 Pillow==10.2.0
+
 pyautogui==0.9.54
+
 pynput==1.7.6
+
 requests==2.31.0
+
 openai==2.45.0
+
 tensorflow==2.15.0
+
 keras==2.15.0
 
 # 1.使用方法
