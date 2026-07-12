@@ -5,11 +5,38 @@ from PIL import Image
 from keras.models import load_model
 from multiprocess import Pool
 from pynput.keyboard import KeyCode, Listener
-
+import random
+import os
+from openai import OpenAI
 from config import *
 from time import time
 
 model = load_model('recognize_new')  # 已训练的CNN
+
+current_mode = CURRENT_MODE
+
+def switch_mode():
+    global current_mode, BG_REGION, ROWS, COLS, row_size, cols_size
+    
+    current_mode = (current_mode + 1) % 4
+    config = MODE_CONFIGS[current_mode]
+    
+    BG_REGION = config['bg_region'] if config['bg_region'] else (0, 0, 0, 0)
+    ROWS = config['rows']
+    COLS = config['cols']
+    row_size = BG_REGION[3] / ROWS if ROWS > 0 else 0
+    cols_size = BG_REGION[2] / COLS if COLS > 0 else 0
+    
+    import os
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
+    with open(config_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    import re
+    content = re.sub(r'CURRENT_MODE = \d', f'CURRENT_MODE = {current_mode}', content)
+    with open(config_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    print(f'已切换到{config["name"]}，区域: {BG_REGION}，{ROWS}x{COLS}')
 
 
 # 获取截图
@@ -229,16 +256,61 @@ def game_once(duration=0.01, interval=0.01):
         pos = (BG_REGION[0] + (c - 0.5) * cols_size, BG_REGION[1] + (r - 0.5) * row_size)
         pyautogui.rightClick(pos, duration=duration)
         pyautogui.sleep(interval)
-    if not to_click and not to_flag:
-        pyautogui.moveTo(1, 1)  # 没有可操作的格子，鼠标提示结束
-        return False
+    
+    while not to_click and not to_flag:
+        board = get_cnn_board(model)
+        if np.any(board == 9):
+            print('检测到炸弹，游戏结束')
+            pyautogui.moveTo(1, 1)
+            return False
+        
+        unopened_cells = []
+        for r in range(ROWS):
+            for c in range(COLS):
+                if board[r][c] == -2:
+                    unopened_cells.append((r, c))
+        
+        unopened_count = len(unopened_cells)
+        print(f'死局扫描完成，未翻开格子数: {unopened_count}')
+        
+        if unopened_count == 0:
+            print('所有格子已翻开，游戏完成')
+            pyautogui.moveTo(1, 1)
+            return False
+        
+        r, c = random.choice(unopened_cells)
+        pos = (BG_REGION[0] + (c - 0.5) * cols_size, BG_REGION[1] + (r - 0.5) * row_size)
+        pyautogui.click(pos, duration=duration)
+        pyautogui.sleep(0.1)
+        print('死局，随机点击', (r, c))
+        
+        pyautogui.sleep(0.2)
+        board = get_cnn_board(model)
+        to_click, to_flag = deal_board(board)
+        print('click_pos', to_click)
+        print('flag_pos', to_flag)
+    
     return True
 
 
 def game_all():
+    board = get_cnn_board(model)
+    if np.all(board == -2):
+        center_r, center_c = ROWS // 2, COLS // 2
+        pos = (BG_REGION[0] + (center_c - 0.5) * cols_size, BG_REGION[1] + (center_r - 0.5) * row_size)
+        pyautogui.click(pos, duration=0.01)
+        pyautogui.sleep(0.1)
     while game_once():
-        pass
+        board = get_cnn_board(model)
+        if 9 in board:
+            print('检测到炸弹，游戏结束')
+            break
 
+
+def log_operation(action, detail=''):
+    from datetime import datetime
+    with open('log.txt', 'a', encoding='utf-8') as f:
+        f.write(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {action} - {detail}\n')
 
 def on_press(key):
     # print(key,str(key))
@@ -247,7 +319,11 @@ def on_press(key):
             game_once()
 
         elif key.char == 'b':
+            log_operation('AI自动扫雷', '用户按下B键')
             game_all()
+
+        elif key.char == 'h':
+            switch_mode()
 
         elif key.char == 'r':
             record_board(model)
@@ -264,6 +340,54 @@ def on_press(key):
             pool.close()
             pool.join()
 
+        elif key.char == 'l':  # 将预测结果保存到situation.txt并调用大模型求解
+            log_operation('大模型分析', '用户按下L键')
+            board = get_cnn_board(model)
+            with open('situation.txt', 'w') as f:
+                for row in board:
+                    f.write(' '.join(map(str, row)) + '\n')
+            print('预测结果已保存到situation.txt')
+            
+            if LLM_API_BASE and LLM_API_KEY and LLM_MODEL_NAME:
+                board_str = '\n'.join(' '.join(map(str, row)) for row in board)
+                prompt = f"""这是一个扫雷游戏的棋盘状态，共{ROWS}行{COLS}列。
+数字含义：
+- -2：未翻开的格子
+- -1：标记为旗子的格子
+- 0-8：周围地雷数量
+- 9：已翻开的地雷
+当前棋盘状态：
+{board_str}
+请分析这个扫雷局面，给出可以确定是地雷的格子位置（行号,列号，从1开始）"""
+
+                    # headers = {
+                    #     'Content-Type': 'application/json',
+                    #     'Authorization': f'Bearer {LLM_API_KEY}'
+                    # }
+                    # data = {
+                    #     'model': LLM_MODEL_NAME,
+                    #     'messages': [f'{{"role": "user", "content": "{prompt}"}}'],
+                    #     'temperature': 0.1
+                    # }
+                    # response = requests.post(f'{LLM_API_BASE}/chat/completions', headers=headers, json=data)
+                    # response.raise_for_status()
+                    # result = response.json()
+                    # answer = result['choices'][0]['message']['content']
+                    
+                    # print('大模型分析结果：')
+                    # print(answer)
+                try:
+                    client = OpenAI(api_key=os.getenv(f"{LLM_API_KEY}"),
+                                    base_url=LLM_API_BASE)
+                    completion = client.chat.completions.create(
+                    model=LLM_MODEL_NAME,
+                    messages=[f'{{"role": "user", "content": "{prompt}"}}'])
+                    print(completion.choices[0].message.content)
+                except Exception as e:
+                    print(f'调用大模型失败：{e}')
+            else:
+                print('未配置大模型API参数，请在config.py中填写LLM_API_BASE、LLM_API_KEY和LLM_MODEL_NAME')
+
         elif key.char == 'q':
             return False
 
@@ -274,12 +398,5 @@ def start_listen():
 
 
 if __name__ == '__main__':
-    print('开始监听,按 A 键截图并执行脚本一次,\n'
-          '按 B 键截图并执行脚本直到无法推理,\n'
-          '按 C 键截图并显示截图结果,\n'
-          '按 S 键截图并显示预测结果,\n'
-          '按 R 键截图并保存截图到文件夹,\n'
-          '按 Q 键退出,\n'
-          '注：1.如果鼠标失去控制，快速移动鼠标，将鼠标移出屏幕左上角会强制退出程序\n'
-          '2.显示截图结果和预测结果与主线程冲突，需要开启新进程，响应会比较慢')
+    print("AI扫雷程序已启动")
     start_listen()
